@@ -1,20 +1,19 @@
 """Kompiliert einfache Spezifikationen in testbare Properties."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
 
 
 @dataclass
 class Specification:
     function_name: str
-    preconditions: list[str]
-    postconditions: list[str]
-    invariants: list[str]
+    preconditions: list[str] = field(default_factory=list)
+    postconditions: list[str] = field(default_factory=list)
+    invariants: list[str] = field(default_factory=list)
 
 
 class SpecCompiler:
-    """Übersetzt deklarative Specs in Property-Tests."""
+    """Uebersetzt deklarative Specs in Property-Tests (als Quelltext)."""
 
     def compile(self, spec: Specification) -> str:
         lines = [
@@ -25,29 +24,32 @@ class SpecCompiler:
             "@given(x=st.integers())",
             f"def test_{spec.function_name}_spec(x):",
         ]
+        body = []
         for pre in spec.preconditions:
-            lines.append(f"    assume({pre})")
-        lines.append(f"    result = {spec.function_name}(x)")
+            body.append(f"    assume({pre})")
+        body.append(f"    result = {spec.function_name}(x)")
         for post in spec.postconditions:
-            safe = post.replace("result", "result").replace("x", "x")
-            lines.append(f"    assert {safe}, f'postcondition failed: {post}'")
-        return "\n".join(lines)
+            body.append(f"    assert {post}, 'postcondition failed: {post}'")
+        if not spec.postconditions:
+            body.append("    assert result is not None")
+        return "\n".join(lines + body)
 
     def from_intent(self, intent: str, function_name: str) -> Specification:
-        """Aus natürlicher Sprache (SOTA-Feature)."""
         intent = intent.lower()
         pre, post, inv = [], [], []
-        if "positive" in intent or "non-negative" in intent:
+        if "positive" in intent or "non-negative" in intent or "nicht-negativ" in intent:
             post.append("result >= 0")
-        if "sorted" in intent:
+        if "sorted" in intent or "sortiert" in intent:
             post.append("result == sorted(result)")
-        if "non-empty input" in intent:
+        if "non-empty input" in intent or "nicht-leer" in intent:
             pre.append("len(x) > 0")
         if "idempotent" in intent:
             post.append(f"{function_name}(result) == result")
         if not post:
             post.append("result is not None")
-        return Specification(function_name=function_name,
-                             preconditions=pre,
-                             postconditions=post,
-                             invariants=inv)
+        return Specification(
+            function_name=function_name,
+            preconditions=pre,
+            postconditions=post,
+            invariants=inv,
+        )

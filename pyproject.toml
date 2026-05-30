@@ -9,12 +9,17 @@ description = "Lightweight Formal Verification for AI-Generated Code"
 requires-python = ">=3.11"
 dependencies = [
     "hypothesis>=6.90",
-    "astroid>=3.0",
     "typer>=0.9.0",
     "pydantic>=2.5",
     "pyyaml>=6.0",
     "jinja2>=3.1",
 ]
 
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
 [project.scripts]
 poc = "sin_code_poc.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]

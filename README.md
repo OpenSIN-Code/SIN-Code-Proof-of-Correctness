@@ -1,27 +1,50 @@
 # SIN-Code Proof of Correctness (POC)
 
-Forces agents to write formal specifications before code. Auto-TLA+ / Lean for the real world.
+> Lightweight, practical formal verification for AI-generated code —
+> property-based testing driven by function signatures and natural-language
+> intent.
+
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
+
+Part of the [SIN-Code](https://github.com/OpenSIN-Code) agent-engineering stack.
+
+## Why
+
+Full theorem proving (TLA+, Lean) is too heavy for everyday agent loops. POC
+brings the *spirit* of formal methods to the practical layer: it infers
+**properties** (invariants) a function should satisfy, renders runnable
+[Hypothesis](https://hypothesis.readthedocs.io/) tests, and verifies them at
+runtime — turning "looks right" into "checked against hundreds of inputs".
 
 ## Features
-- Property suggestion from function signatures
-- Hypothesis test generation
-- Runtime verification with configurable example counts
-- Natural-language intent compilation
-- Static signature extraction via AST
 
-## Install
+- **Property generator** — infers candidate invariants (idempotence,
+  monotonicity, length-preservation, sorted output, reversibility, purity, …)
+  from a function's signature and name.
+- **Runtime verifier** — executes properties with Hypothesis and reports
+  `PASS` / `FAIL` / `SKIPPED` per property (no unsafe `eval`).
+- **Spec compiler** — turns declarative pre/post-conditions, or a
+  natural-language intent, into a property test.
+- **CLI** (`poc`) for suggesting, verifying, and compiling specs.
+
+## Quickstart
+
 ```bash
 pip install -e .
+poc suggest mymodule.py my_function       # print suggested Hypothesis tests
+poc verify mymodule.py my_function        # run runtime verification
+poc from-intent "returns a non-negative, sorted list" my_function
 ```
 
-## Usage
-```bash
-poc suggest my_module.py my_function        # suggest properties
-poc verify my_module.py my_function         # run verification
-poc from-intent "returns sorted list" sort  # compile intent to spec
-```
+## Documentation
 
-## Architecture
-- `PropertyGenerator`: Suggests properties based on heuristics
-- `SpecCompiler`: Translates specifications to test code
-- `RuntimeVerifier`: Executes hypothesis tests and reports violations
+- [INSTALL.md](./INSTALL.md)
+- [docs/USAGE.md](./docs/USAGE.md)
+- [docs/CONFIGURATION.md](./docs/CONFIGURATION.md)
+- [CONTRIBUTING.md](./CONTRIBUTING.md)
+- [CHANGELOG.md](./CHANGELOG.md)
+
+## License
+
+MIT — see [LICENSE](./LICENSE).
