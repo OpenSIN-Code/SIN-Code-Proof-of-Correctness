@@ -14,7 +14,7 @@ cd SIN-Code-Proof-of-Correctness
 pip install -e .
 ```
 
-This installs the `poc` command and the importable package `sin_code_poc`.
+This installs the importable package `sin_code_poc`.
 
 ## Install into an isolated environment
 
@@ -24,11 +24,19 @@ source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -e .
 ```
 
+## Optional: MCP server support
+
+The MCP server requires the optional `mcp` dependency:
+
+```bash
+pip install -e ".[mcp]"
+```
+
 ## Verify the installation
 
 ```bash
-poc --help
 pytest -q
+python -c "from sin_code_poc import ProofGenerator; print('OK')"
 ```
 
 ## Uninstall

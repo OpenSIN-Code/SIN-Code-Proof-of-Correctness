@@ -3,7 +3,7 @@
 For pure functions with numeric operations, symbolically execute
 with abstract inputs and verify output invariants.
 
-Docs: strategies/symbolic.py.doc.md
+Docs: symbolic.py.doc.md
 """
 from __future__ import annotations
 

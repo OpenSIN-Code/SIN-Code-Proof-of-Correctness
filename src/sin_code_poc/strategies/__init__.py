@@ -1,6 +1,6 @@
 """Strategy base classes and registry for SIN-Code POC.
 
-Docs: strategies/__init__.doc.md
+Docs: __init__.py.doc.md
 """
 from __future__ import annotations
 

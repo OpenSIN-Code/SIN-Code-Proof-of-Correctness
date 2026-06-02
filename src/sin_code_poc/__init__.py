@@ -4,7 +4,7 @@ Multi-strategy proof-of-correctness for Python functions. Combines
 symbolic execution (sympy), property-based testing (hypothesis), and
 static type checking (mypy) to verify common invariants.
 
-Docs: generator.doc.md
+Docs: generator.py.doc.md
 """
 
 from sin_code_poc.proof import Proof, ProofStep, Verdict
