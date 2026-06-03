@@ -1,6 +1,8 @@
 """Type checking strategy using mypy.
 
 Verifies type signatures prevent certain classes of errors.
+
+Docs: typecheck.py.doc.md
 """
 from __future__ import annotations
 
@@ -13,10 +15,19 @@ from sin_code_poc.proof import ProofStep, Verdict
 from sin_code_poc.strategies import Strategy
 
 
+# mypy invocation. `--ignore-missing-imports` keeps mypy quiet about
+# stubs the user's code references; `--no-error-summary` trims output
+# so the step's `details` field stays readable.
+_MYPY_CMD = ["python", "-m", "mypy", "--ignore-missing-imports", "--no-error-summary"]
+_MYPY_TIMEOUT_SEC = 30
+
+
 class TypecheckStrategy(Strategy):
     """Type checking strategy using mypy.
 
-    Verifies type signatures prevent certain classes of errors.
+    Writes the user's function to a temp file, runs mypy, and emits
+    one step per property reflecting the type system's view. Useful
+    as a "type perspective" complement to the runtime strategies.
     """
 
     name = "typecheck"
@@ -24,10 +35,16 @@ class TypecheckStrategy(Strategy):
     def generate(
         self, function_code: str, properties: list[str]
     ) -> list[ProofStep]:
+        """Run the strategy: shell out to mypy, then emit per-property steps.
+
+        The mypy subprocess is bounded by `_MYPY_TIMEOUT_SEC`; an
+        exceeded timeout is treated as a generic execution error.
+        """
         steps: list[ProofStep] = []
         sig = self._build_signature(function_code)
 
-        # Create a temporary file with the function
+        # Create a temporary file with the function. `delete=False` because
+        # we still need the path for mypy; cleanup happens in `finally`.
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".py", delete=False
         ) as f:
@@ -37,10 +54,10 @@ class TypecheckStrategy(Strategy):
         try:
             # Run mypy
             result = subprocess.run(
-                ["python", "-m", "mypy", "--ignore-missing-imports", "--no-error-summary", temp_path],
+                _MYPY_CMD + [temp_path],
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=_MYPY_TIMEOUT_SEC,
             )
             mypy_passed = result.returncode == 0
             mypy_output = result.stdout.strip()
@@ -48,6 +65,7 @@ class TypecheckStrategy(Strategy):
             mypy_passed = False
             mypy_output = f"mypy execution error: {exc}"
         finally:
+            # Always clean up the temp file, even on mypy timeout / crash.
             os.unlink(temp_path)
 
         steps.append(
@@ -78,7 +96,12 @@ class TypecheckStrategy(Strategy):
         return steps
 
     def _has_type_annotations(self, function_code: str) -> bool:
-        """Check if the function has any type annotations."""
+        """Check if the function has any type annotations.
+
+        Returns True if *any* arg annotation or the return annotation
+        is present. We don't care about completeness — partial
+        annotation is still useful info for the report.
+        """
         import ast
         try:
             tree = ast.parse(function_code)
@@ -99,7 +122,12 @@ class TypecheckStrategy(Strategy):
     def _check_property_type_perspective(
         self, prop: str, mypy_passed: bool, has_annotations: bool
     ) -> ProofStep:
-        """Provide a type-check perspective on a property."""
+        """Provide a type-check perspective on a property.
+
+        Most properties are UNKNOWN because Python's type system cannot
+        express commutativity, monotonicity, etc. Only `total` can be
+        partially informed (mypy flags missing return paths).
+        """
         if prop == "pure":
             # Type annotations don't guarantee purity, but no IO types help
             return ProofStep(
@@ -120,6 +148,8 @@ class TypecheckStrategy(Strategy):
                 )
             return ProofStep(
                 description="Check total (type perspective)",
+                # UNKNOWN (not FAILED) because mypy issues may be unrelated
+                # to the missing-return path (e.g. import errors).
                 verdict=Verdict.UNKNOWN,
                 details="mypy found issues; review for missing returns",
                 strategy=self.name,

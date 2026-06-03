@@ -17,11 +17,24 @@ from sin_code_poc.proof import ProofStep, Verdict
 from sin_code_poc.strategies import Strategy
 
 
+# AST node kinds that imply control flow symbolic execution cannot model.
+# (Sympy has no built-in translation for `if` / `for` / `with` / `try`.)
+_UNSUPPORTED_CONTROL_FLOW = (ast.If, ast.For, ast.While, ast.With, ast.Try, ast.TryStar)
+
+# `math` module functions we know how to translate. Other math functions
+# trigger an "unsupported" error from `_ast_to_sympy`.
+_SUPPORTED_MATH_FUNCS = frozenset({"sqrt", "sin", "cos", "floor", "ceil"})
+
+
 class SymbolicStrategy(Strategy):
     """Symbolic execution strategy using sympy.
 
     Parses the function AST, attempts to translate numeric operations
     into sympy expressions, and verifies properties symbolically.
+
+    Falls back to a `SKIPPED` translation step (rather than `FAILED`) when
+    the function uses any control flow we can't model — this signals to
+    the generator that the testing strategy should take over.
     """
 
     name = "symbolic"
@@ -29,6 +42,12 @@ class SymbolicStrategy(Strategy):
     def generate(
         self, function_code: str, properties: list[str]
     ) -> list[ProofStep]:
+        """Run the strategy: compile → translate → check each property.
+
+        Returns a list of `ProofStep` records. The first two steps
+        (`Compile function` and `Translate to sympy`) are always emitted;
+        per-property steps follow.
+        """
         steps: list[ProofStep] = []
         sig = self._build_signature(function_code)
 
@@ -61,6 +80,9 @@ class SymbolicStrategy(Strategy):
                 ProofStep(
                     description="Translate to sympy",
                     verdict=Verdict.SKIPPED,
+                    # We deliberately return SKIPPED here (not FAILED) so the
+                    # auto-fallback in ProofGenerator knows to try the
+                    # testing strategy next.
                     details="Function contains unsupported operations for symbolic translation",
                     strategy=self.name,
                 )
@@ -88,7 +110,9 @@ class SymbolicStrategy(Strategy):
     ) -> tuple[sp.Expr | None, list[sp.Symbol], bool]:
         """Translate a simple function body into a sympy expression.
 
-        Returns ``(expr, symbols, success)``.
+        Returns `(expr, symbols, success)`. The symbols list is always
+        populated (even on failure) so callers can still emit meaningful
+        diagnostics that name the function's parameters.
         """
         try:
             tree = ast.parse(function_code)
@@ -108,13 +132,12 @@ class SymbolicStrategy(Strategy):
         sym_map = {name: sym for name, sym in zip(arg_names, symbols)}
 
         # Check for unsupported control flow in the body
-        unsupported_nodes = (ast.If, ast.For, ast.While, ast.With, ast.Try, ast.TryStar)
         for stmt in func_def.body:
-            if isinstance(stmt, unsupported_nodes):
+            if isinstance(stmt, _UNSUPPORTED_CONTROL_FLOW):
                 return None, symbols, False
             # Also scan inside statements for nested unsupported nodes
             for node in ast.walk(stmt):
-                if isinstance(node, unsupported_nodes):
+                if isinstance(node, _UNSUPPORTED_CONTROL_FLOW):
                     return None, symbols, False
 
         # We only support simple return statements with arithmetic
@@ -132,7 +155,12 @@ class SymbolicStrategy(Strategy):
             return None, symbols, False
 
     def _ast_to_sympy(self, node: ast.expr, sym_map: dict[str, sp.Symbol]) -> sp.Expr:
-        """Convert an AST expression node into a sympy expression."""
+        """Convert an AST expression node into a sympy expression.
+
+        Recursive descent: each branch maps one AST node type to one
+        sympy construction. Anything not handled raises `ValueError`,
+        which the caller catches and turns into a SKIPPED step.
+        """
         if isinstance(node, ast.Name):
             if node.id in sym_map:
                 return sym_map[node.id]
@@ -155,6 +183,7 @@ class SymbolicStrategy(Strategy):
             if isinstance(node.op, ast.Pow):
                 return left**right
             if isinstance(node.op, ast.FloorDiv):
+                # `sp.floor` preserves the integer-typed-divide semantics.
                 return sp.floor(left / right)
             if isinstance(node.op, ast.Mod):
                 return left % right
@@ -166,13 +195,18 @@ class SymbolicStrategy(Strategy):
                 return self._ast_to_sympy(node.operand, sym_map)
             raise ValueError("Unsupported unary operator")
         if isinstance(node, ast.Call):
-            # Support math functions like sqrt, sin, cos, abs
+            # Built-in `abs(...)` translates directly to `sp.Abs(...)`.
             if isinstance(node.func, ast.Name) and node.func.id == "abs":
                 if len(node.args) == 1:
                     return sp.Abs(self._ast_to_sympy(node.args[0], sym_map))
-            if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id == "math":
+            # `math.<func>(x)` is mapped via the `_SUPPORTED_MATH_FUNCS` set.
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "math"
+            ):
                 math_func = node.func.attr
-                if len(node.args) == 1:
+                if math_func in _SUPPORTED_MATH_FUNCS and len(node.args) == 1:
                     arg = self._ast_to_sympy(node.args[0], sym_map)
                     if math_func == "sqrt":
                         return sp.sqrt(arg)
@@ -194,7 +228,12 @@ class SymbolicStrategy(Strategy):
         sym_expr: sp.Expr | None,
         sym_args: list[sp.Symbol],
     ) -> ProofStep:
-        """Check a single property symbolically."""
+        """Check a single property symbolically.
+
+        Each property has a dedicated branch. Properties not in the
+        catalog return SKIPPED with a clear "not supported" detail
+        so the report surfaces the gap.
+        """
         if sym_expr is None:
             return ProofStep(
                 description=f"Check {prop}",
@@ -232,6 +271,9 @@ class SymbolicStrategy(Strategy):
 
             if prop == "monotonic":
                 if len(sym_args) >= 1:
+                    # `derivative >= 0` is undecidable in general; we trust
+                    # sympy to return True / False / a residual expression
+                    # (which we treat as UNKNOWN).
                     derivative = sp.diff(sym_expr, sym_args[0])
                     is_mono = sp.simplify(derivative >= 0)
                     if is_mono == True:
@@ -263,6 +305,8 @@ class SymbolicStrategy(Strategy):
 
             if prop == "commutative":
                 if len(sym_args) >= 2:
+                    # `simultaneous=True` is required so the swap doesn't
+                    # collapse to identity when one arg is substituted first.
                     swapped = sym_expr.subs(
                         [(sym_args[0], sym_args[1]), (sym_args[1], sym_args[0])],
                         simultaneous=True,
@@ -290,6 +334,7 @@ class SymbolicStrategy(Strategy):
 
             if prop == "idempotent":
                 if len(sym_args) >= 1:
+                    # `f(f(x))` is `expr.subs({x: expr})`.
                     composed = sym_expr.subs({sym_args[0]: sym_expr})
                     diff = sp.simplify(composed - sym_expr)
                     if diff == 0:
@@ -318,6 +363,8 @@ class SymbolicStrategy(Strategy):
                     return ProofStep(
                         description="Check no_exceptions",
                         verdict=Verdict.UNKNOWN,
+                        # UNKNOWN (not FAILED) because the singularity is a
+                        # *potential* zero-division, not a proven one.
                         details="Potential singularities (e.g., division by zero)",
                         strategy=self.name,
                     )
@@ -335,6 +382,7 @@ class SymbolicStrategy(Strategy):
                 strategy=self.name,
             )
         except Exception as exc:
+            # Catch-all so a single bad property never aborts the whole proof.
             return ProofStep(
                 description=f"Check {prop}",
                 verdict=Verdict.UNKNOWN,
@@ -343,7 +391,13 @@ class SymbolicStrategy(Strategy):
             )
 
     def _has_singularity(self, expr: sp.Expr, args: list[sp.Symbol]) -> bool:
-        """Heuristic check for potential singularities (division by symbolic args)."""
+        """Heuristic check for potential singularities (division by symbolic args).
+
+        Examines the denominator of `expr`'s rational form: if any
+        function argument appears there, the expression could divide
+        by zero when that argument is 0. False negatives are possible
+        (e.g. `1 / (x*x + 1)` has no singularities) but no false positives.
+        """
         for denom in expr.as_numer_denom()[1].free_symbols:
             if denom in args:
                 return True

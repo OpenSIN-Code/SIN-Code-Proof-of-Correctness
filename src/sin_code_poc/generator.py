@@ -15,7 +15,16 @@ from sin_code_poc.strategies.typecheck import TypecheckStrategy
 from sin_code_poc.verifier import Verifier
 
 
-# Register strategies at import time
+# Valid strategy names. Centralized so both the constructor and `_auto_generate`
+# can validate without duplicating string literals.
+_VALID_STRATEGIES = ("auto", "symbolic", "testing", "typecheck")
+
+# Fallback order for `auto` mode. Symbolic first because it gives the strongest
+# guarantees when it works; testing as the catch-all for non-arithmetic code.
+_AUTO_FALLBACK_ORDER = ("symbolic", "testing")
+
+
+# Register strategies at import time so a single import gives a usable registry.
 _registry = StrategyRegistry()
 _registry.register(SymbolicStrategy())
 _registry.register(TestingStrategy())
@@ -23,30 +32,35 @@ _registry.register(TypecheckStrategy())
 
 
 def _get_strategy(name: str) -> Any:
+    """Look up a strategy by name (delegates to the module-level registry)."""
     return _registry.get(name)
 
 
 def _available_strategies() -> list[str]:
+    """List the names of all currently registered strategies."""
     return _registry.available()
 
 
 class ProofGenerator:
     """Generate proofs of correctness for Python functions.
 
-    Uses one of several strategies (symbolic, testing, typecheck) or
-    auto-selects the best strategy based on the function.
+    Uses one of several strategies (`symbolic`, `testing`, `typecheck`) or
+    auto-selects the best strategy based on the function. In `auto` mode
+    the generator tries symbolic first, then falls back to testing.
     """
 
     def __init__(self, strategy: str = "auto"):
         """Initialize with a strategy.
 
         Args:
-            strategy: One of ``"auto"``, ``"symbolic"``, ``"testing"``,
-                ``"typecheck"``.
+            strategy: One of `"auto"`, `"symbolic"`, `"testing"`, `"typecheck"`.
+
+        Raises:
+            ValueError: If `strategy` is not one of the allowed names.
         """
-        if strategy not in ("auto", "symbolic", "testing", "typecheck"):
+        if strategy not in _VALID_STRATEGIES:
             raise ValueError(
-                f"Unknown strategy: {strategy!r}. Choose from: auto, symbolic, testing, typecheck"
+                f"Unknown strategy: {strategy!r}. Choose from: {', '.join(_VALID_STRATEGIES)}"
             )
         self.strategy = strategy
 
@@ -66,36 +80,54 @@ class ProofGenerator:
         if self.strategy == "auto":
             proof = self._auto_generate(function_code, parsed_props)
         else:
-            strategy_impl = _get_strategy(self.strategy)
-            steps = strategy_impl.generate(function_code, parsed_props)
-            sig = strategy_impl._build_signature(function_code)
-            verifier = Verifier()
-            proof = Proof(
-                function_signature=sig,
-                properties_requested=tuple(parsed_props),
-                steps=tuple(steps),
-                strategy_used=self.strategy,
-                confidence=verifier.confidence(
-                    Proof(
-                        function_signature=sig,
-                        properties_requested=tuple(parsed_props),
-                        steps=tuple(steps),
-                        strategy_used=self.strategy,
-                        confidence=0.0,
-                    )
-                ),
-            )
+            proof = self._explicit_generate(self.strategy, function_code, parsed_props)
 
         return proof
 
+    def _explicit_generate(
+        self, strategy_name: str, function_code: str, properties: list[str]
+    ) -> Proof:
+        """Run a single named strategy end-to-end and wrap it in a `Proof`.
+
+        The "temp_proof with confidence=0.0" pattern is required because the
+        `Verifier.confidence` is a function of (signature, properties, steps)
+        and we want it to use the *actual* steps the strategy produced, not
+        whatever the calling code chose to set.
+        """
+        strategy_impl = _get_strategy(strategy_name)
+        steps = strategy_impl.generate(function_code, properties)
+        sig = strategy_impl._build_signature(function_code)
+        verifier = Verifier()
+        temp_proof = Proof(
+            function_signature=sig,
+            properties_requested=tuple(properties),
+            steps=tuple(steps),
+            strategy_used=strategy_name,
+            confidence=0.0,
+        )
+        return Proof(
+            function_signature=sig,
+            properties_requested=tuple(properties),
+            steps=tuple(steps),
+            strategy_used=strategy_name,
+            confidence=verifier.confidence(temp_proof),
+        )
+
     def _auto_generate(self, function_code: str, properties: list[str]) -> Proof:
-        """Auto strategy: try symbolic first, then testing, then typecheck."""
+        """Auto strategy: try symbolic first, then testing (typecheck excluded).
+
+        The fallback order is fixed at import time; we never fall back to
+        `typecheck` because its verdict is `UNKNOWN` for almost every property.
+        """
         # Try symbolic first
         sym = SymbolicStrategy()
         steps = sym.generate(function_code, properties)
         sig = sym._build_signature(function_code)
 
         # Check if symbolic succeeded (no skipped translation step)
+        # We probe the step list for the canonical "Translate to sympy"
+        # description that SymbolicStrategy emits; this is the cleanest
+        # way to detect "function is too complex for sympy".
         translation_skipped = any(
             s.description == "Translate to sympy" and s.verdict == Verdict.SKIPPED
             for s in steps

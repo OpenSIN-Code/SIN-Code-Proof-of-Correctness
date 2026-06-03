@@ -1,8 +1,10 @@
 """Property catalog and parsing for SIN-Code POC.
 
-Defines the six built-in invariants (``pure``, ``total``, ``monotonic``,
-``commutative``, ``idempotent``, ``no_exceptions``) and helpers to parse
-the user-supplied ``properties`` string in :py:meth:`ProofGenerator.generate`.
+Defines the six built-in invariants (`pure`, `total`, `monotonic`,
+`commutative`, `idempotent`, `no_exceptions`) and helpers to parse
+the user-supplied `properties` string in `ProofGenerator.generate`.
+
+Docs: properties.py.doc.md
 """
 
 from __future__ import annotations
@@ -10,6 +12,17 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from typing import Callable
+
+
+# Sentinel arity used by PropertySpec to mean "any number of arguments".
+_ARITY_ANY = -1
+
+# Tokens that, if seen in a property spec, mean "use every registered property".
+_ALL_TOKENS = {"all", "*", "default"}
+
+# Fallback bucket for unknown tokens in parse_property_spec. Big enough
+# to push unknown names past any registered name in `_ordered`.
+_UNKNOWN_ORDER = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -20,9 +33,10 @@ class PropertySpec:
         name: Canonical property name (lowercase, snake_case).
         description: Human-readable description of the invariant.
         arity: Required parameter count for the target function
-            (``1`` for unary, ``2`` for binary, ``-1`` for any arity).
-        category: Logical category — ``"determinism"``, ``"termination"``,
-            ``"order"``, or ``"structure"``.
+            (`1` for unary, `2` for binary, `_ARITY_ANY` for any arity).
+        category: Logical category — `"determinism"`, `"termination"`,
+            `"order"`, or `"structure"`.
+        aliases: Alternative names a user might pass to the parser.
     """
 
     name: str
@@ -32,18 +46,21 @@ class PropertySpec:
     aliases: tuple[str, ...] = field(default_factory=tuple)
 
 
+# ── Property catalog ───────────────────────────────────────────────────
+# Each entry is the single source of truth for the property; tests and
+# the report serializer both read from this dict.
 PROPERTY_REGISTRY: dict[str, PropertySpec] = {
     "pure": PropertySpec(
         name="pure",
         description="Function has no side effects; same input always yields same output.",
-        arity=-1,
+        arity=_ARITY_ANY,
         category="determinism",
         aliases=("deterministic", "no_side_effects"),
     ),
     "total": PropertySpec(
         name="total",
         description="Function returns a value for every input in its domain.",
-        arity=-1,
+        arity=_ARITY_ANY,
         category="termination",
         aliases=("no_hang",),
     ),
@@ -71,7 +88,7 @@ PROPERTY_REGISTRY: dict[str, PropertySpec] = {
     "no_exceptions": PropertySpec(
         name="no_exceptions",
         description="Function never raises an exception on valid inputs.",
-        arity=-1,
+        arity=_ARITY_ANY,
         category="termination",
         aliases=("never_raises", "no_raise"),
     ),
@@ -79,12 +96,12 @@ PROPERTY_REGISTRY: dict[str, PropertySpec] = {
 
 
 def list_properties() -> list[str]:
-    """Return the canonical names of all registered properties."""
+    """Return the canonical names of all registered properties (in registry order)."""
     return list(PROPERTY_REGISTRY)
 
 
 def property_metadata(name: str) -> PropertySpec:
-    """Look up a :class:`PropertySpec` by canonical name or alias.
+    """Look up a `PropertySpec` by canonical name or alias.
 
     Raises:
         KeyError: If the name is not in the registry and matches no alias.
@@ -98,6 +115,8 @@ def property_metadata(name: str) -> PropertySpec:
     raise KeyError(f"Unknown property: {name!r}")
 
 
+# Natural-language patterns used as a fallback when no explicit token matched.
+# Ordered most-specific-first so idempotent/commutative win over generic "pure".
 _NL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b(idempotent|idemp)\b", re.I), "idempotent"),
     (re.compile(r"\b(commut|symmetric|symmetric)\b", re.I), "commutative"),
@@ -109,11 +128,11 @@ _NL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 
 
 def parse_property_spec(spec: str) -> list[str]:
-    """Parse the ``properties`` argument of :py:meth:`ProofGenerator.generate`.
+    """Parse the `properties` argument of `ProofGenerator.generate`.
 
     Accepts:
 
-    * an empty string or ``"all"`` → every registered property;
+    * an empty string or `"all"` → every registered property;
     * a comma- or whitespace-separated list of property names/aliases →
       the matching canonical names, in registry order;
     * a natural-language sentence → properties matched by keyword.
@@ -124,7 +143,7 @@ def parse_property_spec(spec: str) -> list[str]:
     if not spec or not spec.strip():
         return list_properties()
     text = spec.strip().lower()
-    if text in {"all", "*", "default"}:
+    if text in _ALL_TOKENS:
         return list_properties()
 
     explicit: list[str] = []
@@ -136,18 +155,20 @@ def parse_property_spec(spec: str) -> list[str]:
             if token not in explicit:
                 explicit.append(token)
             continue
-        matched = False
+        # Alias lookup. We don't break out of the outer loop even after a match
+        # because the next token may resolve to a different property; the
+        # dedup `if spec_.name not in explicit` guard keeps the result stable.
         for spec_ in PROPERTY_REGISTRY.values():
             if token in spec_.aliases:
                 if spec_.name not in explicit:
                     explicit.append(spec_.name)
-                matched = True
                 break
         # natural-language fragments are handled below
 
     if explicit:
         return _ordered(explicit)
 
+    # No explicit token matched → try the natural-language patterns.
     nl_hits: list[str] = []
     for pattern, canonical in _NL_PATTERNS:
         if pattern.search(text) and canonical not in nl_hits:
@@ -156,8 +177,13 @@ def parse_property_spec(spec: str) -> list[str]:
 
 
 def _ordered(names: list[str]) -> list[str]:
+    """Sort a list of property names into registry declaration order.
+
+    Unknown names sort to the end (after `_UNKNOWN_ORDER`) so they're easy
+    to spot in logs without breaking deterministic ordering.
+    """
     order = {n: i for i, n in enumerate(PROPERTY_REGISTRY)}
-    return sorted(names, key=lambda n: order.get(n, 1_000_000))
+    return sorted(names, key=lambda n: order.get(n, _UNKNOWN_ORDER))
 
 
 CheckerFn = Callable[[Callable[..., object], object], bool]
@@ -179,11 +205,15 @@ class _RuntimeChecker:
 def runtime_checkers() -> dict[str, _RuntimeChecker]:
     """Return runtime checkers for the six registered properties.
 
-    Each checker accepts ``(fn, x)`` where ``x`` matches the property's
-    ``arity`` (a single value for unary properties, a tuple for binary).
+    Each checker accepts `(fn, x)` where `x` matches the property's
+    `arity` (a single value for unary properties, a tuple for binary).
     """
 
+    # ── Per-property checkers ──────────────────────────────────────────
+    # Each is a closure over the function-under-test and the input.
+
     def _passes(fn, x):
+        """Property: function returns (no assertion about value)."""
         try:
             fn(x)
             return True
@@ -191,6 +221,10 @@ def runtime_checkers() -> dict[str, _RuntimeChecker]:
             return False
 
     def _no_raise(fn, x):
+        """Property: function doesn't raise. Equivalent to `_passes` today;
+        kept as a separate function so future refinement (e.g. allowlist
+        of specific exception types) can target `no_exceptions` alone.
+        """
         try:
             fn(x)
             return True
@@ -198,12 +232,18 @@ def runtime_checkers() -> dict[str, _RuntimeChecker]:
             return False
 
     def _deterministic(fn, x):
+        """Property: pure — same input gives same output across calls."""
         try:
             return fn(x) == fn(x)
         except Exception:
             return False
 
     def _monotonic(fn, x):
+        """Property: monotonic — for `a <= b`, `fn(a) <= fn(b)`.
+
+        When the input order is reversed we short-circuit True because
+        the property is symmetric in the comparison direction.
+        """
         a, b = x
         if a <= b:
             try:
@@ -213,6 +253,7 @@ def runtime_checkers() -> dict[str, _RuntimeChecker]:
         return True
 
     def _commutative(fn, x):
+        """Property: commutative — `fn(a, b) == fn(b, a)`."""
         a, b = x
         try:
             return fn(a, b) == fn(b, a)
@@ -220,6 +261,7 @@ def runtime_checkers() -> dict[str, _RuntimeChecker]:
             return False
 
     def _idempotent(fn, x):
+        """Property: idempotent — `fn(fn(x)) == fn(x)`."""
         try:
             once = fn(x)
             twice = fn(once)
